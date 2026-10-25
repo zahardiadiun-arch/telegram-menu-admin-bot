@@ -5,6 +5,7 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 const STATE_PATH = "telegram-menu-admin-bot/state.json";
+const SESSION_PREFIX = "telegram-menu-admin-bot/sessions/";
 const PLACEHOLDER = "...";
 const LEGACY_PLACEHOLDER = "🚧 Цей розділ зараз у розробці.";
 
@@ -25,7 +26,6 @@ function emptyState() {
   return {
     buttons: initialButtons.map((button) => ({ ...button, text: PLACEHOLDER, photoFileId: null })),
     users: {},
-    sessions: {},
   };
 }
 
@@ -45,17 +45,6 @@ function normalizeState(value) {
     };
   });
   fallback.users = value.users && typeof value.users === "object" ? value.users : {};
-  const savedSessions = value.sessions && typeof value.sessions === "object" ? value.sessions : {};
-  fallback.sessions = Object.fromEntries(
-    Object.entries(savedSessions).map(([chatId, session]) => {
-      const stage = session?.stage;
-      const validStage = stage
-        && typeof stage === "object"
-        && ["text", "title", "photo"].includes(stage.kind)
-        && typeof stage.id === "string";
-      return [chatId, validStage ? { stage } : {}];
-    }),
-  );
   return fallback;
 }
 
@@ -72,6 +61,39 @@ async function readState() {
 
 async function writeState(state) {
   await put(STATE_PATH, JSON.stringify(state), {
+    access: "private",
+    addRandomSuffix: false,
+    allowOverwrite: true,
+    contentType: "application/json; charset=utf-8",
+  });
+}
+
+function sessionPath(chatId) {
+  return `${SESSION_PREFIX}${String(chatId)}.json`;
+}
+
+function normalizeSession(value) {
+  const stage = value?.stage;
+  const isValid = stage
+    && typeof stage === "object"
+    && ["text", "title", "photo"].includes(stage.kind)
+    && typeof stage.id === "string";
+  return isValid ? { stage: { kind: stage.kind, id: stage.id } } : {};
+}
+
+async function readSession(chatId) {
+  try {
+    const result = await get(sessionPath(chatId), { access: "private" });
+    if (!result || result.statusCode !== 200) return {};
+    return normalizeSession(await new Response(result.stream).json());
+  } catch (error) {
+    console.error("Unable to read admin session", error);
+    return {};
+  }
+}
+
+async function writeSession(chatId, session) {
+  await put(sessionPath(chatId), JSON.stringify(normalizeSession(session)), {
     access: "private",
     addRandomSuffix: false,
     allowOverwrite: true,
@@ -225,13 +247,11 @@ async function showEdit(chatId, button, savedMessage = "") {
 
 async function handleAdminText(message, state) {
   const chatId = message.chat.id;
-  const key = String(chatId);
-  const session = state.sessions[key] || {};
+  const session = await readSession(chatId);
   const text = message.text?.trim();
 
   if (text === "/cancel") {
-    delete session.stage;
-    state.sessions[key] = session;
+    await writeSession(chatId, {});
     await showAdmin(chatId, "Поточну дію скасовано.");
     return true;
   }
@@ -239,7 +259,7 @@ async function handleAdminText(message, state) {
   // A valid password always opens a fresh admin panel. There is no sticky
   // "waiting for password" state that can accidentally block the public menu.
   if (text && text === process.env.ADMIN_PASSWORD) {
-    state.sessions[key] = {};
+    await writeSession(chatId, {});
     await showAdmin(chatId, "✅ Доступ дозволено. Що змінюємо?");
     return true;
   }
@@ -248,8 +268,7 @@ async function handleAdminText(message, state) {
   const { kind, id } = session.stage;
   const button = findButton(state, id);
   if (!button) {
-    delete session.stage;
-    state.sessions[key] = session;
+    await writeSession(chatId, {});
     await showAdmin(chatId, "Кнопку не знайдено. Оберіть її ще раз.");
     return true;
   }
@@ -260,8 +279,7 @@ async function handleAdminText(message, state) {
       return true;
     }
     button.text = text;
-    delete session.stage;
-    state.sessions[key] = session;
+    await writeSession(chatId, {});
     await showEdit(chatId, button, "Текст збережено.");
     return true;
   }
@@ -272,8 +290,7 @@ async function handleAdminText(message, state) {
       return true;
     }
     button.label = text.slice(0, 60);
-    delete session.stage;
-    state.sessions[key] = session;
+    await writeSession(chatId, {});
     await showEdit(chatId, button, "Назву кнопки збережено.");
     return true;
   }
@@ -285,8 +302,7 @@ async function handleAdminText(message, state) {
       return true;
     }
     button.photoFileId = photo.file_id;
-    delete session.stage;
-    state.sessions[key] = session;
+    await writeSession(chatId, {});
     await showEdit(chatId, button, "Фото збережено.");
     return true;
   }
@@ -297,7 +313,6 @@ async function handleAdminText(message, state) {
 async function handleCallback(query, state) {
   const data = query.data || "";
   const chatId = query.message?.chat?.id;
-  const sessionKey = String(chatId);
   await telegram("answerCallbackQuery", { callback_query_id: query.id });
 
   if (data.startsWith("open:")) {
@@ -342,12 +357,9 @@ async function handleCallback(query, state) {
       title: `Надішліть нову назву для «${button.label}».`,
       photo: `Надішліть фото для «${button.label}» як зображення.`,
     };
-    state.sessions[sessionKey] = {
-      stage: { kind: action, id },
-    };
-    // Save the chosen edit action before displaying its prompt. This prevents
-    // a fast reply from being handled before the stage reaches storage.
-    await writeState(state);
+    // Sessions live in a separate Blob per chat. A stale settings write can
+    // therefore never turn a photo edit back into an old text edit.
+    await writeSession(chatId, { stage: { kind: action, id } });
     await telegram("sendMessage", {
       chat_id: chatId,
       text: `${prompts[action]}\n\nПросто надішліть текст або фото в чат. Для скасування: /cancel`,
@@ -413,11 +425,11 @@ export async function POST(request) {
       const command = message.text?.trim();
 
       if (command === "/start") {
-        state.sessions[String(chatId)] = {};
+        await writeSession(chatId, {});
         await showPublicMenu(state, chatId);
         changed = true;
       } else if (command === "/admin123123321") {
-        state.sessions[String(chatId)] = {};
+        await writeSession(chatId, {});
         changed = true;
         await telegram("sendMessage", { chat_id: chatId, text: "Введіть пароль для адмін-панелі:" });
       } else {
