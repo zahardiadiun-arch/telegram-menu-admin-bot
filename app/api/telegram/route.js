@@ -272,16 +272,17 @@ async function handleCallback(query, state) {
 
   if (!session.authorized) return;
 
-  if (data === "ad:home") {
-    await showAdmin(chatId);
-    return;
-  }
-  if (data === "ad:public") {
+  const opensLegacyPublicMenu = data === "ad:home" && query.message?.text?.includes("Доступ дозволено");
+  if (data === "ad:public" || opensLegacyPublicMenu) {
     await telegram("sendMessage", {
       chat_id: chatId,
       text: "...",
       reply_markup: menuKeyboard(state),
     });
+    return;
+  }
+  if (data === "ad:home") {
+    await showAdmin(chatId);
     return;
   }
   if (data === "ad:buttons") {
