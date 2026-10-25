@@ -45,7 +45,18 @@ function normalizeState(value) {
     };
   });
   fallback.users = value.users && typeof value.users === "object" ? value.users : {};
-  fallback.sessions = value.sessions && typeof value.sessions === "object" ? value.sessions : {};
+  const savedSessions = value.sessions && typeof value.sessions === "object" ? value.sessions : {};
+  fallback.sessions = Object.fromEntries(
+    Object.entries(savedSessions).map(([chatId, session]) => {
+      const stage = session?.stage;
+      const validStage = stage
+        && typeof stage === "object"
+        && ["text", "title", "photo"].includes(stage.kind)
+        && typeof stage.id === "string"
+        && Number.isInteger(stage.promptMessageId);
+      return [chatId, validStage ? { stage } : {}];
+    }),
+  );
   return fallback;
 }
 
@@ -231,7 +242,8 @@ async function handleAdminText(message, state) {
   }
 
   if (!session.stage) return false;
-  const [kind, id] = session.stage.split(":");
+  if (message.reply_to_message?.message_id !== session.stage.promptMessageId) return false;
+  const { kind, id } = session.stage;
   const button = findButton(state, id);
   if (!button) {
     delete session.stage;
@@ -323,13 +335,19 @@ async function handleCallback(query, state) {
     return;
   }
   if (["text", "title", "photo"].includes(action)) {
-    state.sessions[sessionKey] = { stage: `${action}:${id}` };
     const prompts = {
       text: `Надішліть новий текст для «${button.label}».`,
       title: `Надішліть нову назву для «${button.label}».`,
       photo: `Надішліть фото для «${button.label}» як зображення.`,
     };
-    await telegram("sendMessage", { chat_id: chatId, text: `${prompts[action]}\n\nДля скасування: /cancel` });
+    const prompt = await telegram("sendMessage", {
+      chat_id: chatId,
+      text: `${prompts[action]}\n\nВідповідайте саме на це повідомлення. Для скасування: /cancel`,
+      reply_markup: { force_reply: true, input_field_placeholder: "Відповідь для редагування" },
+    });
+    state.sessions[sessionKey] = {
+      stage: { kind: action, id, promptMessageId: prompt.message_id },
+    };
     return;
   }
   if (action === "clearphoto") {
@@ -399,12 +417,11 @@ export async function POST(request) {
         changed = true;
         await telegram("sendMessage", { chat_id: chatId, text: "Введіть пароль для адмін-панелі:" });
       } else {
-        const session = state.sessions[String(chatId)] || {};
-        const selectedButton = !session.stage ? findButtonByLabel(state, command) : null;
+        const handled = await handleAdminText(message, state);
+        const selectedButton = handled ? null : findButtonByLabel(state, command);
         if (selectedButton) {
           await sendSection(chatId, selectedButton, menuKeyboard(state));
         }
-        const handled = selectedButton ? false : await handleAdminText(message, state);
         if (handled) changed = true;
       }
     }
