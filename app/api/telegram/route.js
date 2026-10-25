@@ -107,7 +107,7 @@ function adminKeyboard() {
     inline_keyboard: [
       [{ text: "🛠 Редагувати кнопки", callback_data: "ad:buttons" }],
       [{ text: "📣 Розсилка розділу", callback_data: "ad:broadcast" }],
-      [{ text: "🏠 Звичайне меню", callback_data: "ad:home" }],
+      [{ text: "⌨️ Звичайне меню", callback_data: "ad:public" }],
     ],
   };
 }
@@ -274,6 +274,14 @@ async function handleCallback(query, state) {
 
   if (data === "ad:home") {
     await showAdmin(chatId);
+    return;
+  }
+  if (data === "ad:public") {
+    await telegram("sendMessage", {
+      chat_id: chatId,
+      text: "...",
+      reply_markup: menuKeyboard(state),
+    });
     return;
   }
   if (data === "ad:buttons") {
