@@ -1,4 +1,5 @@
 import { get, put } from "@vercel/blob";
+import { createHmac, timingSafeEqual } from "node:crypto";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -102,36 +103,52 @@ function menuKeyboard(state) {
   };
 }
 
-function adminKeyboard() {
+function makeAdminToken(chatId) {
+  return createHmac("sha256", process.env.ADMIN_PASSWORD || "missing-password")
+    .update(String(chatId))
+    .digest("hex")
+    .slice(0, 16);
+}
+
+function hasValidAdminToken(chatId, candidate) {
+  if (!candidate || candidate.length !== 16) return false;
+  const expected = makeAdminToken(chatId);
+  return timingSafeEqual(Buffer.from(expected), Buffer.from(candidate));
+}
+
+function adminKeyboard(chatId) {
+  const token = makeAdminToken(chatId);
   return {
     inline_keyboard: [
-      [{ text: "🛠 Редагувати кнопки", callback_data: "ad:buttons" }],
-      [{ text: "📣 Розсилка розділу", callback_data: "ad:broadcast" }],
-      [{ text: "⌨️ Звичайне меню", callback_data: "ad:public" }],
+      [{ text: "🛠 Редагувати кнопки", callback_data: `ad:${token}:buttons` }],
+      [{ text: "📣 Розсилка розділу", callback_data: `ad:${token}:broadcast` }],
+      [{ text: "⌨️ Звичайне меню", callback_data: `ad:${token}:public` }],
     ],
   };
 }
 
-function buttonPicker(state, prefix, title = "Оберіть кнопку") {
+function buttonPicker(state, chatId, action, title = "Оберіть кнопку") {
+  const token = makeAdminToken(chatId);
   return {
     text: title,
     reply_markup: {
       inline_keyboard: [
-        ...state.buttons.map((button) => [{ text: button.label, callback_data: `${prefix}:${button.id}` }]),
-        [{ text: "‹ До адмін-панелі", callback_data: "ad:admin" }],
+        ...state.buttons.map((button) => [{ text: button.label, callback_data: `ad:${token}:${action}:${button.id}` }]),
+        [{ text: "‹ До адмін-панелі", callback_data: `ad:${token}:admin` }],
       ],
     },
   };
 }
 
-function editKeyboard(button) {
+function editKeyboard(button, chatId) {
+  const token = makeAdminToken(chatId);
   return {
     inline_keyboard: [
-      [{ text: "✍️ Змінити текст", callback_data: `ad:text:${button.id}` }],
-      [{ text: "🖼 Додати / замінити фото", callback_data: `ad:photo:${button.id}` }],
-      ...(button.photoFileId ? [[{ text: "🗑 Видалити фото", callback_data: `ad:clearphoto:${button.id}` }]] : []),
-      [{ text: "✏️ Змінити назву", callback_data: `ad:title:${button.id}` }],
-      [{ text: "‹ До кнопок", callback_data: "ad:buttons" }],
+      [{ text: "✍️ Змінити текст", callback_data: `ad:${token}:text:${button.id}` }],
+      [{ text: "🖼 Додати / замінити фото", callback_data: `ad:${token}:photo:${button.id}` }],
+      ...(button.photoFileId ? [[{ text: "🗑 Видалити фото", callback_data: `ad:${token}:clearphoto:${button.id}` }]] : []),
+      [{ text: "✏️ Змінити назву", callback_data: `ad:${token}:title:${button.id}` }],
+      [{ text: "‹ До кнопок", callback_data: `ad:${token}:buttons` }],
     ],
   };
 }
@@ -144,20 +161,7 @@ function findButtonByLabel(state, label) {
   return state.buttons.find((button) => button.label === label);
 }
 
-function switchToPublicMode(state, chatId) {
-  const key = String(chatId);
-  const session = state.sessions[key] || {};
-  state.sessions[key] = { authorized: session.authorized === true, mode: "public" };
-}
-
-function switchToAdminMode(state, chatId) {
-  const key = String(chatId);
-  const session = state.sessions[key] || {};
-  state.sessions[key] = { ...session, authorized: true, mode: "admin" };
-}
-
 async function showPublicMenu(state, chatId) {
-  switchToPublicMode(state, chatId);
   await telegram("sendMessage", {
     chat_id: chatId,
     text: "...",
@@ -193,7 +197,7 @@ async function sendSection(chatId, button, replyMarkup) {
 }
 
 async function showAdmin(chatId, text = "Адмін-панель") {
-  await telegram("sendMessage", { chat_id: chatId, text, reply_markup: adminKeyboard() });
+  await telegram("sendMessage", { chat_id: chatId, text, reply_markup: adminKeyboard(chatId) });
 }
 
 async function showEdit(chatId, button) {
@@ -201,7 +205,7 @@ async function showEdit(chatId, button) {
   await telegram("sendMessage", {
     chat_id: chatId,
     text: `Кнопка: ${button.label}\n${photoStatus}\n\nОберіть, що редагувати:`,
-    reply_markup: editKeyboard(button),
+    reply_markup: editKeyboard(button, chatId),
   });
 }
 
@@ -213,24 +217,20 @@ async function handleAdminText(message, state) {
 
   if (text === "/cancel") {
     delete session.stage;
-    delete session.awaitPassword;
-    session.mode = "admin";
     state.sessions[key] = session;
     await showAdmin(chatId, "Поточну дію скасовано.");
     return true;
   }
 
-  if (session.awaitPassword) {
-    if (text && text === process.env.ADMIN_PASSWORD) {
-      state.sessions[key] = { authorized: true, mode: "admin" };
-      await showAdmin(chatId, "✅ Доступ дозволено. Що змінюємо?");
-    } else {
-      await telegram("sendMessage", { chat_id: chatId, text: "Невірний пароль. Спробуйте ще раз або надішліть /cancel." });
-    }
+  // A valid password always opens a fresh admin panel. There is no sticky
+  // "waiting for password" state that can accidentally block the public menu.
+  if (text && text === process.env.ADMIN_PASSWORD) {
+    state.sessions[key] = {};
+    await showAdmin(chatId, "✅ Доступ дозволено. Що змінюємо?");
     return true;
   }
 
-  if (!session.authorized || !session.stage) return false;
+  if (!session.stage) return false;
   const [kind, id] = session.stage.split(":");
   const button = findButton(state, id);
   if (!button) {
@@ -284,7 +284,6 @@ async function handleCallback(query, state) {
   const data = query.data || "";
   const chatId = query.message?.chat?.id;
   const sessionKey = String(chatId);
-  const session = state.sessions[sessionKey] || {};
   await telegram("answerCallbackQuery", { callback_query_id: query.id });
 
   if (data.startsWith("open:")) {
@@ -293,80 +292,71 @@ async function handleCallback(query, state) {
     return;
   }
 
-  if (!session.authorized) return;
+  const [, receivedToken, action, id] = data.split(":");
+  if (!hasValidAdminToken(chatId, receivedToken)) {
+    await telegram("sendMessage", {
+      chat_id: chatId,
+      text: "Ця стара адмін-панель більше не активна. Надішліть /admin123123321 і пароль ще раз.",
+    });
+    return;
+  }
 
-  // Old admin messages used ad:home for the public menu. Keep them working.
-  if (data === "ad:public" || data === "ad:home") {
+  if (action === "public") {
     await showPublicMenu(state, chatId);
     return;
   }
-  if (data === "ad:admin") {
-    switchToAdminMode(state, chatId);
+  if (action === "admin") {
     await showAdmin(chatId);
     return;
   }
-  if (data === "ad:buttons") {
-    switchToAdminMode(state, chatId);
-    const picker = buttonPicker(state, "ad:edit", "Оберіть кнопку для редагування:");
+  if (action === "buttons") {
+    const picker = buttonPicker(state, chatId, "edit", "Оберіть кнопку для редагування:");
     await telegram("sendMessage", { chat_id: chatId, ...picker });
     return;
   }
-  if (data.startsWith("ad:edit:")) {
-    switchToAdminMode(state, chatId);
-    const button = findButton(state, data.split(":")[2]);
-    if (button) await showEdit(chatId, button);
+
+  const button = id ? findButton(state, id) : null;
+  if (["edit", "text", "title", "photo", "clearphoto", "send", "confirm"].includes(action) && !button) return;
+
+  if (action === "edit") {
+    await showEdit(chatId, button);
     return;
   }
-  if (data.startsWith("ad:text:") || data.startsWith("ad:title:") || data.startsWith("ad:photo:")) {
-    const [, kind, id] = data.split(":");
-    const button = findButton(state, id);
-    if (!button) return;
-    session.stage = `${kind}:${id}`;
-    session.mode = "admin";
-    state.sessions[sessionKey] = session;
+  if (["text", "title", "photo"].includes(action)) {
+    state.sessions[sessionKey] = { stage: `${action}:${id}` };
     const prompts = {
       text: `Надішліть новий текст для «${button.label}».`,
       title: `Надішліть нову назву для «${button.label}».`,
       photo: `Надішліть фото для «${button.label}» як зображення.`,
     };
-    await telegram("sendMessage", { chat_id: chatId, text: `${prompts[kind]}\n\nДля скасування: /cancel` });
+    await telegram("sendMessage", { chat_id: chatId, text: `${prompts[action]}\n\nДля скасування: /cancel` });
     return;
   }
-  if (data.startsWith("ad:clearphoto:")) {
-    switchToAdminMode(state, chatId);
-    const button = findButton(state, data.split(":")[2]);
-    if (button) {
-      button.photoFileId = null;
-      await showEdit(chatId, button);
-    }
+  if (action === "clearphoto") {
+    button.photoFileId = null;
+    await showEdit(chatId, button);
     return;
   }
-  if (data === "ad:broadcast") {
-    switchToAdminMode(state, chatId);
-    const picker = buttonPicker(state, "ad:send", "Оберіть розділ для розсилки всім користувачам:");
+  if (action === "broadcast") {
+    const picker = buttonPicker(state, chatId, "send", "Оберіть розділ для розсилки всім користувачам:");
     await telegram("sendMessage", { chat_id: chatId, ...picker });
     return;
   }
-  if (data.startsWith("ad:send:")) {
-    switchToAdminMode(state, chatId);
-    const button = findButton(state, data.split(":")[2]);
-    if (!button) return;
+  if (action === "send") {
+    const token = makeAdminToken(chatId);
     await telegram("sendMessage", {
       chat_id: chatId,
       text: `Розіслати «${button.label}» усім, хто запускав бота?`,
       reply_markup: {
         inline_keyboard: [
-          [{ text: "✅ Так, розіслати", callback_data: `ad:confirm:${button.id}` }],
-          [{ text: "‹ До адмін-панелі", callback_data: "ad:admin" }],
+          [{ text: "✅ Так, розіслати", callback_data: `ad:${token}:confirm:${button.id}` }],
+          [{ text: "‹ До адмін-панелі", callback_data: `ad:${token}:admin` }],
         ],
       },
     });
     return;
   }
-  if (data.startsWith("ad:confirm:")) {
-    switchToAdminMode(state, chatId);
-    const button = findButton(state, data.split(":")[2]);
-    if (!button) return;
+  if (action === "confirm") {
     let delivered = 0;
     let failed = 0;
     for (const user of Object.values(state.users)) {
@@ -401,30 +391,20 @@ export async function POST(request) {
       const command = message.text?.trim();
 
       if (command === "/start") {
+        state.sessions[String(chatId)] = {};
         await showPublicMenu(state, chatId);
         changed = true;
       } else if (command === "/admin123123321") {
-        state.sessions[String(chatId)] = { awaitPassword: true, mode: "admin" };
+        state.sessions[String(chatId)] = {};
         changed = true;
         await telegram("sendMessage", { chat_id: chatId, text: "Введіть пароль для адмін-панелі:" });
       } else {
         const session = state.sessions[String(chatId)] || {};
-        const isEditingAdminContent = Boolean(session.awaitPassword || session.stage);
-        const selectedButton = !isEditingAdminContent && session.mode !== "admin"
-          ? findButtonByLabel(state, command)
-          : null;
+        const selectedButton = !session.stage ? findButtonByLabel(state, command) : null;
         if (selectedButton) {
           await sendSection(chatId, selectedButton, menuKeyboard(state));
         }
-        if (!selectedButton && session.authorized && session.mode === "admin" && command) {
-          await telegram("sendMessage", {
-            chat_id: chatId,
-            text: "Зараз увімкнено адмін-режим. Натисніть «⌨️ Звичайне меню» в адмін-панелі.",
-          });
-        }
-        const handled = selectedButton || (session.authorized && session.mode === "admin" && command)
-          ? false
-          : await handleAdminText(message, state);
+        const handled = selectedButton ? false : await handleAdminText(message, state);
         if (handled) changed = true;
       }
     }
