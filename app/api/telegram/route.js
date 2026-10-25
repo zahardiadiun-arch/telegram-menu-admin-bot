@@ -210,11 +210,15 @@ async function showAdmin(chatId, text = "Адмін-панель") {
   await telegram("sendMessage", { chat_id: chatId, text, reply_markup: adminKeyboard(chatId) });
 }
 
-async function showEdit(chatId, button) {
+async function showEdit(chatId, button, savedMessage = "") {
   const photoStatus = button.photoFileId ? "✅ фото встановлено" : "— фото немає";
+  const contentPreview = button.text?.trim()
+    ? `Текст зараз: ${button.text.trim().slice(0, 350)}`
+    : "Текст зараз: ...";
+  const confirmation = savedMessage ? `✅ ${savedMessage}\n\n` : "";
   await telegram("sendMessage", {
     chat_id: chatId,
-    text: `Кнопка: ${button.label}\n${photoStatus}\n\nОберіть, що редагувати:`,
+    text: `${confirmation}Кнопка: ${button.label}\n${photoStatus}\n${contentPreview}\n\nОберіть, що редагувати:`,
     reply_markup: editKeyboard(button, chatId),
   });
 }
@@ -258,7 +262,7 @@ async function handleAdminText(message, state) {
     button.text = text;
     delete session.stage;
     state.sessions[key] = session;
-    await showEdit(chatId, button);
+    await showEdit(chatId, button, "Текст збережено.");
     return true;
   }
 
@@ -270,7 +274,7 @@ async function handleAdminText(message, state) {
     button.label = text.slice(0, 60);
     delete session.stage;
     state.sessions[key] = session;
-    await showEdit(chatId, button);
+    await showEdit(chatId, button, "Назву кнопки збережено.");
     return true;
   }
 
@@ -283,7 +287,7 @@ async function handleAdminText(message, state) {
     button.photoFileId = photo.file_id;
     delete session.stage;
     state.sessions[key] = session;
-    await showEdit(chatId, button);
+    await showEdit(chatId, button, "Фото збережено.");
     return true;
   }
 
