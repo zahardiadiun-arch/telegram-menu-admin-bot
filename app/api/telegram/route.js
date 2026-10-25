@@ -6,6 +6,7 @@ export const maxDuration = 300;
 
 const STATE_PATH = "telegram-menu-admin-bot/state.json";
 const SESSION_PREFIX = "telegram-menu-admin-bot/sessions/";
+const BUTTON_PREFIX = "telegram-menu-admin-bot/buttons/";
 const PLACEHOLDER = "...";
 const LEGACY_PLACEHOLDER = "🚧 Цей розділ зараз у розробці.";
 
@@ -51,8 +52,12 @@ function normalizeState(value) {
 async function readState() {
   try {
     const result = await get(STATE_PATH, { access: "private" });
-    if (!result || result.statusCode !== 200) return emptyState();
-    return normalizeState(await new Response(result.stream).json());
+    const state = !result || result.statusCode !== 200
+      ? emptyState()
+      : normalizeState(await new Response(result.stream).json());
+    const savedButtons = await Promise.all(state.buttons.map((button) => readButton(button.id)));
+    state.buttons = state.buttons.map((button, index) => savedButtons[index] || button);
+    return state;
   } catch (error) {
     console.error("Unable to read bot state", error);
     return emptyState();
@@ -60,7 +65,47 @@ async function readState() {
 }
 
 async function writeState(state) {
-  await put(STATE_PATH, JSON.stringify(state), {
+  // Button contents are saved in their own files. Keeping only users here
+  // prevents a slow webhook request from overwriting a newer button edit.
+  await put(STATE_PATH, JSON.stringify({ users: state.users }), {
+    access: "private",
+    addRandomSuffix: false,
+    allowOverwrite: true,
+    contentType: "application/json; charset=utf-8",
+  });
+}
+
+function buttonPath(id) {
+  return `${BUTTON_PREFIX}${id}.json`;
+}
+
+function normalizeButton(value, id) {
+  const fallback = initialButtons.find((button) => button.id === id);
+  if (!fallback || !value || typeof value !== "object") return null;
+  const text = value.text === LEGACY_PLACEHOLDER ? PLACEHOLDER : value.text;
+  return {
+    ...fallback,
+    label: typeof value.label === "string" ? value.label.slice(0, 60) : fallback.label,
+    text: typeof text === "string" ? text : PLACEHOLDER,
+    photoFileId: typeof value.photoFileId === "string" ? value.photoFileId : null,
+  };
+}
+
+async function readButton(id) {
+  try {
+    const result = await get(buttonPath(id), { access: "private" });
+    if (!result || result.statusCode !== 200) return null;
+    return normalizeButton(await new Response(result.stream).json(), id);
+  } catch (error) {
+    console.error("Unable to read button settings", error);
+    return null;
+  }
+}
+
+async function writeButton(button) {
+  const normalized = normalizeButton(button, button.id);
+  if (!normalized) throw new Error("Unknown button");
+  await put(buttonPath(button.id), JSON.stringify(normalized), {
     access: "private",
     addRandomSuffix: false,
     allowOverwrite: true,
@@ -279,6 +324,7 @@ async function handleAdminText(message, state) {
       return true;
     }
     button.text = text;
+    await writeButton(button);
     await writeSession(chatId, {});
     await showEdit(chatId, button, "Текст збережено.");
     return true;
@@ -290,6 +336,7 @@ async function handleAdminText(message, state) {
       return true;
     }
     button.label = text.slice(0, 60);
+    await writeButton(button);
     await writeSession(chatId, {});
     await showEdit(chatId, button, "Назву кнопки збережено.");
     return true;
@@ -302,6 +349,7 @@ async function handleAdminText(message, state) {
       return true;
     }
     button.photoFileId = photo.file_id;
+    await writeButton(button);
     await writeSession(chatId, {});
     await showEdit(chatId, button, "Фото збережено.");
     return true;
@@ -368,6 +416,7 @@ async function handleCallback(query, state) {
   }
   if (action === "clearphoto") {
     button.photoFileId = null;
+    await writeButton(button);
     await showEdit(chatId, button);
     return;
   }
