@@ -118,7 +118,7 @@ function buttonPicker(state, prefix, title = "Оберіть кнопку") {
     reply_markup: {
       inline_keyboard: [
         ...state.buttons.map((button) => [{ text: button.label, callback_data: `${prefix}:${button.id}` }]),
-        [{ text: "‹ Назад", callback_data: "ad:home" }],
+        [{ text: "‹ До адмін-панелі", callback_data: "ad:admin" }],
       ],
     },
   };
@@ -144,6 +144,27 @@ function findButtonByLabel(state, label) {
   return state.buttons.find((button) => button.label === label);
 }
 
+function switchToPublicMode(state, chatId) {
+  const key = String(chatId);
+  const session = state.sessions[key] || {};
+  state.sessions[key] = { authorized: session.authorized === true, mode: "public" };
+}
+
+function switchToAdminMode(state, chatId) {
+  const key = String(chatId);
+  const session = state.sessions[key] || {};
+  state.sessions[key] = { ...session, authorized: true, mode: "admin" };
+}
+
+async function showPublicMenu(state, chatId) {
+  switchToPublicMode(state, chatId);
+  await telegram("sendMessage", {
+    chat_id: chatId,
+    text: "...",
+    reply_markup: menuKeyboard(state),
+  });
+}
+
 function rememberUser(state, chat, user) {
   if (!chat?.id) return false;
   const key = String(chat.id);
@@ -160,12 +181,13 @@ function rememberUser(state, chat, user) {
 async function sendSection(chatId, button, replyMarkup) {
   const text = button.text?.trim() || PLACEHOLDER;
   if (button.photoFileId) {
-    return telegram("sendPhoto", {
+    await telegram("sendPhoto", {
       chat_id: chatId,
       photo: button.photoFileId,
-      caption: text,
-      reply_markup: replyMarkup,
+      ...(text.length <= 1024 ? { caption: text, reply_markup: replyMarkup } : { reply_markup: replyMarkup }),
     });
+    if (text.length > 1024) return telegram("sendMessage", { chat_id: chatId, text });
+    return;
   }
   return telegram("sendMessage", { chat_id: chatId, text, reply_markup: replyMarkup });
 }
@@ -192,6 +214,7 @@ async function handleAdminText(message, state) {
   if (text === "/cancel") {
     delete session.stage;
     delete session.awaitPassword;
+    session.mode = "admin";
     state.sessions[key] = session;
     await showAdmin(chatId, "Поточну дію скасовано.");
     return true;
@@ -199,7 +222,7 @@ async function handleAdminText(message, state) {
 
   if (session.awaitPassword) {
     if (text && text === process.env.ADMIN_PASSWORD) {
-      state.sessions[key] = { authorized: true };
+      state.sessions[key] = { authorized: true, mode: "admin" };
       await showAdmin(chatId, "✅ Доступ дозволено. Що змінюємо?");
     } else {
       await telegram("sendMessage", { chat_id: chatId, text: "Невірний пароль. Спробуйте ще раз або надішліть /cancel." });
@@ -272,25 +295,24 @@ async function handleCallback(query, state) {
 
   if (!session.authorized) return;
 
-  const opensLegacyPublicMenu = data === "ad:home" && query.message?.text?.includes("Доступ дозволено");
-  if (data === "ad:public" || opensLegacyPublicMenu) {
-    await telegram("sendMessage", {
-      chat_id: chatId,
-      text: "...",
-      reply_markup: menuKeyboard(state),
-    });
+  // Old admin messages used ad:home for the public menu. Keep them working.
+  if (data === "ad:public" || data === "ad:home") {
+    await showPublicMenu(state, chatId);
     return;
   }
-  if (data === "ad:home") {
+  if (data === "ad:admin") {
+    switchToAdminMode(state, chatId);
     await showAdmin(chatId);
     return;
   }
   if (data === "ad:buttons") {
+    switchToAdminMode(state, chatId);
     const picker = buttonPicker(state, "ad:edit", "Оберіть кнопку для редагування:");
     await telegram("sendMessage", { chat_id: chatId, ...picker });
     return;
   }
   if (data.startsWith("ad:edit:")) {
+    switchToAdminMode(state, chatId);
     const button = findButton(state, data.split(":")[2]);
     if (button) await showEdit(chatId, button);
     return;
@@ -300,6 +322,7 @@ async function handleCallback(query, state) {
     const button = findButton(state, id);
     if (!button) return;
     session.stage = `${kind}:${id}`;
+    session.mode = "admin";
     state.sessions[sessionKey] = session;
     const prompts = {
       text: `Надішліть новий текст для «${button.label}».`,
@@ -310,6 +333,7 @@ async function handleCallback(query, state) {
     return;
   }
   if (data.startsWith("ad:clearphoto:")) {
+    switchToAdminMode(state, chatId);
     const button = findButton(state, data.split(":")[2]);
     if (button) {
       button.photoFileId = null;
@@ -318,11 +342,13 @@ async function handleCallback(query, state) {
     return;
   }
   if (data === "ad:broadcast") {
+    switchToAdminMode(state, chatId);
     const picker = buttonPicker(state, "ad:send", "Оберіть розділ для розсилки всім користувачам:");
     await telegram("sendMessage", { chat_id: chatId, ...picker });
     return;
   }
   if (data.startsWith("ad:send:")) {
+    switchToAdminMode(state, chatId);
     const button = findButton(state, data.split(":")[2]);
     if (!button) return;
     await telegram("sendMessage", {
@@ -331,13 +357,14 @@ async function handleCallback(query, state) {
       reply_markup: {
         inline_keyboard: [
           [{ text: "✅ Так, розіслати", callback_data: `ad:confirm:${button.id}` }],
-          [{ text: "‹ Скасувати", callback_data: "ad:home" }],
+          [{ text: "‹ До адмін-панелі", callback_data: "ad:admin" }],
         ],
       },
     });
     return;
   }
   if (data.startsWith("ad:confirm:")) {
+    switchToAdminMode(state, chatId);
     const button = findButton(state, data.split(":")[2]);
     if (!button) return;
     let delivered = 0;
@@ -374,23 +401,30 @@ export async function POST(request) {
       const command = message.text?.trim();
 
       if (command === "/start") {
-        await telegram("sendMessage", {
-          chat_id: chatId,
-          text: "...",
-          reply_markup: menuKeyboard(state),
-        });
+        await showPublicMenu(state, chatId);
+        changed = true;
       } else if (command === "/admin123123321") {
-        state.sessions[String(chatId)] = { awaitPassword: true };
+        state.sessions[String(chatId)] = { awaitPassword: true, mode: "admin" };
         changed = true;
         await telegram("sendMessage", { chat_id: chatId, text: "Введіть пароль для адмін-панелі:" });
       } else {
         const session = state.sessions[String(chatId)] || {};
         const isEditingAdminContent = Boolean(session.awaitPassword || session.stage);
-        const selectedButton = isEditingAdminContent ? null : findButtonByLabel(state, command);
+        const selectedButton = !isEditingAdminContent && session.mode !== "admin"
+          ? findButtonByLabel(state, command)
+          : null;
         if (selectedButton) {
           await sendSection(chatId, selectedButton, menuKeyboard(state));
         }
-        const handled = selectedButton ? false : await handleAdminText(message, state);
+        if (!selectedButton && session.authorized && session.mode === "admin" && command) {
+          await telegram("sendMessage", {
+            chat_id: chatId,
+            text: "Зараз увімкнено адмін-режим. Натисніть «⌨️ Звичайне меню» в адмін-панелі.",
+          });
+        }
+        const handled = selectedButton || (session.authorized && session.mode === "admin" && command)
+          ? false
+          : await handleAdminText(message, state);
         if (handled) changed = true;
       }
     }
