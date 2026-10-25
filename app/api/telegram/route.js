@@ -52,8 +52,7 @@ function normalizeState(value) {
       const validStage = stage
         && typeof stage === "object"
         && ["text", "title", "photo"].includes(stage.kind)
-        && typeof stage.id === "string"
-        && Number.isInteger(stage.promptMessageId);
+        && typeof stage.id === "string";
       return [chatId, validStage ? { stage } : {}];
     }),
   );
@@ -242,7 +241,6 @@ async function handleAdminText(message, state) {
   }
 
   if (!session.stage) return false;
-  if (message.reply_to_message?.message_id !== session.stage.promptMessageId) return false;
   const { kind, id } = session.stage;
   const button = findButton(state, id);
   if (!button) {
@@ -340,14 +338,16 @@ async function handleCallback(query, state) {
       title: `Надішліть нову назву для «${button.label}».`,
       photo: `Надішліть фото для «${button.label}» як зображення.`,
     };
-    const prompt = await telegram("sendMessage", {
-      chat_id: chatId,
-      text: `${prompts[action]}\n\nВідповідайте саме на це повідомлення. Для скасування: /cancel`,
-      reply_markup: { force_reply: true, input_field_placeholder: "Відповідь для редагування" },
-    });
     state.sessions[sessionKey] = {
-      stage: { kind: action, id, promptMessageId: prompt.message_id },
+      stage: { kind: action, id },
     };
+    // Save the chosen edit action before displaying its prompt. This prevents
+    // a fast reply from being handled before the stage reaches storage.
+    await writeState(state);
+    await telegram("sendMessage", {
+      chat_id: chatId,
+      text: `${prompts[action]}\n\nПросто надішліть текст або фото в чат. Для скасування: /cancel`,
+    });
     return;
   }
   if (action === "clearphoto") {
@@ -417,11 +417,13 @@ export async function POST(request) {
         changed = true;
         await telegram("sendMessage", { chat_id: chatId, text: "Введіть пароль для адмін-панелі:" });
       } else {
-        const handled = await handleAdminText(message, state);
-        const selectedButton = handled ? null : findButtonByLabel(state, command);
+        // Public-menu buttons always win over any unfinished edit action.
+        // A user can therefore leave editing by simply choosing a section.
+        const selectedButton = findButtonByLabel(state, command);
         if (selectedButton) {
           await sendSection(chatId, selectedButton, menuKeyboard(state));
         }
+        const handled = selectedButton ? false : await handleAdminText(message, state);
         if (handled) changed = true;
       }
     }
