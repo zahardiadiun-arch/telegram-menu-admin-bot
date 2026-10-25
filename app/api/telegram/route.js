@@ -4,7 +4,8 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 const STATE_PATH = "telegram-menu-admin-bot/state.json";
-const PLACEHOLDER = "🚧 Цей розділ зараз у розробці.";
+const PLACEHOLDER = "...";
+const LEGACY_PLACEHOLDER = "🚧 Цей розділ зараз у розробці.";
 
 const initialButtons = [
   { id: "price", label: "📄 Прайс цін 📄" },
@@ -34,9 +35,11 @@ function normalizeState(value) {
   const savedButtons = Array.isArray(value.buttons) ? value.buttons : [];
   fallback.buttons = fallback.buttons.map((fallbackButton) => {
     const saved = savedButtons.find((button) => button?.id === fallbackButton.id);
+    const normalizedSaved = saved && typeof saved === "object" ? { ...saved } : {};
+    if (normalizedSaved.text === LEGACY_PLACEHOLDER) normalizedSaved.text = PLACEHOLDER;
     return {
       ...fallbackButton,
-      ...(saved && typeof saved === "object" ? saved : {}),
+      ...normalizedSaved,
       id: fallbackButton.id,
     };
   });
@@ -85,14 +88,17 @@ async function telegram(method, body) {
 
 function menuKeyboard(state) {
   const byId = Object.fromEntries(state.buttons.map((button) => [button.id, button]));
-  const row = (...ids) => ids.map((id) => ({ text: byId[id].label, callback_data: `open:${id}` }));
+  const row = (...ids) => ids.map((id) => byId[id].label);
   return {
-    inline_keyboard: [
+    keyboard: [
       row("price", "order"),
       row("taxi", "reviews"),
       row("uah", "usd", "eur"),
       row("cards", "guide", "why"),
     ],
+    resize_keyboard: true,
+    is_persistent: true,
+    input_field_placeholder: "Оберіть розділ",
   };
 }
 
@@ -132,6 +138,10 @@ function editKeyboard(button) {
 
 function findButton(state, id) {
   return state.buttons.find((button) => button.id === id);
+}
+
+function findButtonByLabel(state, label) {
+  return state.buttons.find((button) => button.label === label);
 }
 
 function rememberUser(state, chat, user) {
@@ -357,7 +367,7 @@ export async function POST(request) {
       if (command === "/start") {
         await telegram("sendMessage", {
           chat_id: chatId,
-          text: "Оберіть потрібний розділ:",
+          text: "...",
           reply_markup: menuKeyboard(state),
         });
       } else if (command === "/admin123123321") {
@@ -365,7 +375,13 @@ export async function POST(request) {
         changed = true;
         await telegram("sendMessage", { chat_id: chatId, text: "Введіть пароль для адмін-панелі:" });
       } else {
-        const handled = await handleAdminText(message, state);
+        const session = state.sessions[String(chatId)] || {};
+        const isEditingAdminContent = Boolean(session.awaitPassword || session.stage);
+        const selectedButton = isEditingAdminContent ? null : findButtonByLabel(state, command);
+        if (selectedButton) {
+          await sendSection(chatId, selectedButton, menuKeyboard(state));
+        }
+        const handled = selectedButton ? false : await handleAdminText(message, state);
         if (handled) changed = true;
       }
     }
