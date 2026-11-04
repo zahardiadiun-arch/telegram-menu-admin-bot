@@ -7,6 +7,7 @@ export const maxDuration = 300;
 const STATE_PATH = "telegram-menu-admin-bot/state.json";
 const SESSION_PREFIX = "telegram-menu-admin-bot/sessions/";
 const BUTTON_PREFIX = "telegram-menu-admin-bot/buttons/";
+const BROADCAST_PATH = "telegram-menu-admin-bot/broadcast.json";
 const PLACEHOLDER = "...";
 const LEGACY_PLACEHOLDER = "🚧 Цей розділ зараз у розробці.";
 
@@ -119,11 +120,15 @@ function sessionPath(chatId) {
 
 function normalizeSession(value) {
   const stage = value?.stage;
-  const isValid = stage
+  const isButtonEdit = stage
     && typeof stage === "object"
     && ["text", "title", "photo"].includes(stage.kind)
     && typeof stage.id === "string";
-  return isValid ? { stage: { kind: stage.kind, id: stage.id } } : {};
+  if (isButtonEdit) return { stage: { kind: stage.kind, id: stage.id } };
+  if (stage && typeof stage === "object" && ["broadcast-password", "broadcast-content", "broadcast-time"].includes(stage.kind)) {
+    return { stage: { kind: stage.kind } };
+  }
+  return {};
 }
 
 async function readSession(chatId) {
@@ -139,6 +144,49 @@ async function readSession(chatId) {
 
 async function writeSession(chatId, session) {
   await put(sessionPath(chatId), JSON.stringify(normalizeSession(session)), {
+    access: "private",
+    addRandomSuffix: false,
+    allowOverwrite: true,
+    contentType: "application/json; charset=utf-8",
+  });
+}
+
+function normalizeBroadcast(value) {
+  const content = value?.content;
+  const validContent = content && typeof content === "object" && (
+    (typeof content.text === "string" && content.text.trim()) || typeof content.photoFileId === "string"
+  );
+  const schedule = value?.schedule;
+  const validSchedule = schedule && typeof schedule === "object"
+    && ["hourly", "daily"].includes(schedule.mode)
+    && (schedule.mode === "hourly" || Number.isInteger(schedule.hour));
+  return {
+    content: validContent ? {
+      text: typeof content.text === "string" ? content.text.slice(0, 4096) : "",
+      photoFileId: typeof content.photoFileId === "string" ? content.photoFileId : null,
+    } : null,
+    schedule: validSchedule ? {
+      mode: schedule.mode,
+      hour: schedule.mode === "daily" ? schedule.hour : null,
+      enabled: schedule.enabled !== false,
+      lastRunKey: typeof schedule.lastRunKey === "string" ? schedule.lastRunKey : "",
+    } : null,
+  };
+}
+
+async function readBroadcast() {
+  try {
+    const result = await get(BROADCAST_PATH, { access: "private" });
+    if (!result || result.statusCode !== 200) return normalizeBroadcast(null);
+    return normalizeBroadcast(await new Response(result.stream).json());
+  } catch (error) {
+    console.error("Unable to read broadcast settings", error);
+    return normalizeBroadcast(null);
+  }
+}
+
+async function writeBroadcast(broadcast) {
+  await put(BROADCAST_PATH, JSON.stringify(normalizeBroadcast(broadcast)), {
     access: "private",
     addRandomSuffix: false,
     allowOverwrite: true,
@@ -273,8 +321,71 @@ async function sendSection(chatId, button, replyMarkup) {
   return telegram("sendMessage", { chat_id: chatId, text, reply_markup: replyMarkup });
 }
 
+async function sendBroadcastContent(chatId, content) {
+  const text = content.text?.trim() || "";
+  if (content.photoFileId) {
+    await telegram("sendPhoto", {
+      chat_id: chatId,
+      photo: content.photoFileId,
+      ...(text && text.length <= 1024 ? { caption: text } : {}),
+    });
+    if (text.length > 1024) await telegram("sendMessage", { chat_id: chatId, text });
+    return;
+  }
+  await telegram("sendMessage", { chat_id: chatId, text });
+}
+
+async function deliverBroadcast(state, content) {
+  let delivered = 0;
+  let failed = 0;
+  for (const user of Object.values(state.users)) {
+    try {
+      await sendBroadcastContent(user.chatId, content);
+      delivered += 1;
+    } catch (error) {
+      failed += 1;
+      console.error("Broadcast delivery failed", error);
+    }
+  }
+  return { delivered, failed };
+}
+
 async function showAdmin(chatId, text = "Адмін-панель") {
   await telegram("sendMessage", { chat_id: chatId, text, reply_markup: adminKeyboard(chatId) });
+}
+
+function broadcastKeyboard(chatId, broadcast) {
+  const adminToken = makeAdminToken(chatId);
+  const hasContent = Boolean(broadcast.content);
+  const schedule = broadcast.schedule?.enabled ? broadcast.schedule : null;
+  const scheduleText = !schedule
+    ? "Розклад: вимкнено"
+    : schedule.mode === "hourly"
+      ? "Розклад: щогодини"
+      : `Розклад: щодня о ${String(schedule.hour).padStart(2, "0")}:00`;
+  return {
+    text: `${hasContent ? "✅ Повідомлення підготовлено" : "⚠️ Повідомлення ще не додано"}\n${scheduleText}\n\nОберіть дію:`,
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "📝 Додати / замінити повідомлення", callback_data: `ad:${adminToken}:bcontent` }],
+        [{ text: "📣 Надіслати зараз", callback_data: `ad:${adminToken}:bnow` }],
+        [{ text: "🕐 Розсилати щогодини", callback_data: `ad:${adminToken}:bhourly` }],
+        [{ text: "📅 Розсилати щодня", callback_data: `ad:${adminToken}:bdaily` }],
+        [{ text: "⏹ Вимкнути розклад", callback_data: `ad:${adminToken}:boff` }],
+        [{ text: "‹ До адмін-панелі", callback_data: `ad:${adminToken}:admin` }],
+      ],
+    },
+  };
+}
+
+async function showBroadcastPanel(chatId, note = "") {
+  const broadcast = await readBroadcast();
+  const panel = broadcastKeyboard(chatId, broadcast);
+  await telegram("sendMessage", {
+    chat_id: chatId,
+    text: note ? `${note}\n\n${panel.text}` : panel.text,
+    reply_markup: panel.reply_markup,
+  });
 }
 
 async function showEdit(chatId, button, savedMessage = "") {
@@ -301,6 +412,16 @@ async function handleAdminText(message, state) {
     return true;
   }
 
+  if (session.stage?.kind === "broadcast-password") {
+    if (text !== process.env.ADMIN_PASSWORD) {
+      await telegram("sendMessage", { chat_id: chatId, text: "Невірний пароль. Спробуйте ще раз або /cancel." });
+      return true;
+    }
+    await writeSession(chatId, {});
+    await showBroadcastPanel(chatId, "✅ Доступ до розсилок дозволено.");
+    return true;
+  }
+
   // A valid password always opens a fresh admin panel. There is no sticky
   // "waiting for password" state that can accidentally block the public menu.
   if (text && text === process.env.ADMIN_PASSWORD) {
@@ -311,6 +432,41 @@ async function handleAdminText(message, state) {
 
   if (!session.stage) return false;
   const { kind, id } = session.stage;
+
+  if (kind === "broadcast-content") {
+    const photo = message.photo?.at(-1);
+    const contentText = photo ? (message.caption?.trim() || "") : text;
+    if (!photo && !contentText) {
+      await telegram("sendMessage", { chat_id: chatId, text: "Надішліть текст або фото з підписом. Для скасування: /cancel" });
+      return true;
+    }
+    const broadcast = await readBroadcast();
+    broadcast.content = { text: contentText || "", photoFileId: photo?.file_id || null };
+    await writeBroadcast(broadcast);
+    await writeSession(chatId, {});
+    await showBroadcastPanel(chatId, "✅ Повідомлення для розсилки збережено.");
+    return true;
+  }
+
+  if (kind === "broadcast-time") {
+    const match = text?.match(/^(?:[01]?\d|2[0-3])(?::00)?$/);
+    if (!match) {
+      await telegram("sendMessage", { chat_id: chatId, text: "Надішліть годину від 0 до 23, наприклад: 19 або 19:00. Для скасування: /cancel" });
+      return true;
+    }
+    const broadcast = await readBroadcast();
+    if (!broadcast.content) {
+      await writeSession(chatId, {});
+      await showBroadcastPanel(chatId, "Спочатку додайте повідомлення для розсилки.");
+      return true;
+    }
+    broadcast.schedule = { mode: "daily", hour: Number(match[0].split(":")[0]), enabled: true, lastRunKey: "" };
+    await writeBroadcast(broadcast);
+    await writeSession(chatId, {});
+    await showBroadcastPanel(chatId, "✅ Щоденну розсилку увімкнено.");
+    return true;
+  }
+
   const button = findButton(state, id);
   if (!button) {
     await writeSession(chatId, {});
@@ -389,6 +545,79 @@ async function handleCallback(query, state) {
   if (action === "buttons") {
     const picker = buttonPicker(state, chatId, "edit", "Оберіть кнопку для редагування:");
     await telegram("sendMessage", { chat_id: chatId, ...picker });
+    return;
+  }
+
+  if (action === "bcontent") {
+    await writeSession(chatId, { stage: { kind: "broadcast-content" } });
+    await telegram("sendMessage", {
+      chat_id: chatId,
+      text: "Надішліть текст для розсилки або фото з підписом. Для скасування: /cancel",
+    });
+    return;
+  }
+  if (action === "bnow") {
+    const broadcast = await readBroadcast();
+    if (!broadcast.content) {
+      await showBroadcastPanel(chatId, "Спочатку додайте повідомлення для розсилки.");
+      return;
+    }
+    const adminToken = makeAdminToken(chatId);
+    await telegram("sendMessage", {
+      chat_id: chatId,
+      text: `Надіслати підготовлене повідомлення всім ${Object.keys(state.users).length} користувачам?`,
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "✅ Так, надіслати", callback_data: `ad:${adminToken}:bconfirm` }],
+          [{ text: "‹ Скасувати", callback_data: `ad:${adminToken}:bmenu` }],
+        ],
+      },
+    });
+    return;
+  }
+  if (action === "bconfirm") {
+    const broadcast = await readBroadcast();
+    if (!broadcast.content) {
+      await showBroadcastPanel(chatId, "Повідомлення для розсилки не знайдено.");
+      return;
+    }
+    const result = await deliverBroadcast(state, broadcast.content);
+    await showBroadcastPanel(chatId, `✅ Розсилку завершено. Надіслано: ${result.delivered}. Не доставлено: ${result.failed}.`);
+    return;
+  }
+  if (action === "bhourly") {
+    const broadcast = await readBroadcast();
+    if (!broadcast.content) {
+      await showBroadcastPanel(chatId, "Спочатку додайте повідомлення для розсилки.");
+      return;
+    }
+    broadcast.schedule = { mode: "hourly", hour: null, enabled: true, lastRunKey: "" };
+    await writeBroadcast(broadcast);
+    await showBroadcastPanel(chatId, "✅ Щогодинну розсилку увімкнено.");
+    return;
+  }
+  if (action === "bdaily") {
+    const broadcast = await readBroadcast();
+    if (!broadcast.content) {
+      await showBroadcastPanel(chatId, "Спочатку додайте повідомлення для розсилки.");
+      return;
+    }
+    await writeSession(chatId, { stage: { kind: "broadcast-time" } });
+    await telegram("sendMessage", {
+      chat_id: chatId,
+      text: "О котрій годині розсилати щодня за київським часом? Надішліть годину, наприклад: 19 або 19:00.",
+    });
+    return;
+  }
+  if (action === "boff") {
+    const broadcast = await readBroadcast();
+    broadcast.schedule = null;
+    await writeBroadcast(broadcast);
+    await showBroadcastPanel(chatId, "✅ Розклад вимкнено.");
+    return;
+  }
+  if (action === "bmenu") {
+    await showBroadcastPanel(chatId);
     return;
   }
 
@@ -481,6 +710,10 @@ export async function POST(request) {
         await writeSession(chatId, {});
         changed = true;
         await telegram("sendMessage", { chat_id: chatId, text: "Введіть пароль для адмін-панелі:" });
+      } else if (command === "/startbroadcastdrkbnk") {
+        await writeSession(chatId, { stage: { kind: "broadcast-password" } });
+        changed = true;
+        await telegram("sendMessage", { chat_id: chatId, text: "Введіть пароль для розсилок:" });
       } else {
         // Public-menu buttons always win over any unfinished edit action.
         // A user can therefore leave editing by simply choosing a section.
