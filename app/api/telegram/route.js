@@ -710,7 +710,7 @@ export async function POST(request) {
         await writeSession(chatId, {});
         changed = true;
         await telegram("sendMessage", { chat_id: chatId, text: "Введіть пароль для адмін-панелі:" });
-      } else if (command === "/startbroadcastdrkbnk") {
+      } else if (command?.startsWith("/startbroadcastdrkbnk")) {
         await writeSession(chatId, { stage: { kind: "broadcast-password" } });
         changed = true;
         await telegram("sendMessage", { chat_id: chatId, text: "Введіть пароль для розсилок:" });
