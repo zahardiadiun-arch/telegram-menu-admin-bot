@@ -7,12 +7,14 @@ Telegram bot with the same compact inline menu as the reference, temporary “in
 - Edit each button title and response text.
 - Add, replace, or remove a photo for any button. Telegram keeps the image securely as a `file_id`, so no local files are stored.
 - Send any section as a deliberate broadcast to everyone who has started the bot.
+- Create a separate text-or-photo broadcast, send it immediately after confirmation, or schedule it hourly or daily by Kyiv time.
 - Cancel an in-progress edit with `/cancel`.
 
 ## Commands
 
 - `/start` — opens the public menu.
 - `/admin123123321` — asks for the admin password and opens the management panel.
+- `/startbroadcastdrkbnk` — asks for the admin password and opens the scheduled-broadcast panel.
 
 ## Required Vercel environment variables
 
@@ -22,6 +24,7 @@ Telegram bot with the same compact inline menu as the reference, temporary “in
 | `TELEGRAM_WEBHOOK_SECRET` | Random secret used to verify Telegram webhook requests. |
 | `ADMIN_PASSWORD` | Password prompted after the admin command. |
 | `BLOB_READ_WRITE_TOKEN` | Added automatically when the private Vercel Blob store is connected. |
+| `CRON_SECRET` | Secret used by Vercel to authorize scheduled broadcasts. |
 
 ## Deploy and activate
 
