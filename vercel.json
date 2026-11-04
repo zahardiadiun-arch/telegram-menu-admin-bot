@@ -1,6 +1,6 @@
 {
   "crons": [
-+    { "path": "/api/broadcast-tick/0", "schedule": "0 0 * * *" },
+    { "path": "/api/broadcast-tick/0", "schedule": "0 0 * * *" },
     { "path": "/api/broadcast-tick/1", "schedule": "0 1 * * *" },
     { "path": "/api/broadcast-tick/2", "schedule": "0 2 * * *" },
     { "path": "/api/broadcast-tick/3", "schedule": "0 3 * * *" },
