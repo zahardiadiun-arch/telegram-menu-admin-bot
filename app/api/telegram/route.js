@@ -15,7 +15,6 @@ const initialButtons = [
   { id: "price", label: "📄 Прайс цін 📄" },
   { id: "order", label: "🚚 Замовити 🚚" },
   { id: "taxi", label: "🚚 Таксі і клади 📦" },
-  { id: "reviews", label: "✍️ Відгуки ✍️" },
   { id: "uah", label: "💵 Фото Гривни 🇺🇦" },
   { id: "usd", label: "💵 Фото Долари 🇺🇸" },
   { id: "eur", label: "💶 Фото Євро 🇪🇺" },
@@ -218,7 +217,7 @@ function menuKeyboard(state) {
   return {
     keyboard: [
       row("price", "order"),
-      row("taxi", "reviews"),
+      row("taxi"),
       row("uah", "usd", "eur"),
       row("cards", "guide", "why"),
     ],
